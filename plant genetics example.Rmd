@@ -1,0 +1,494 @@
+---
+title: "Appendix: simulations of plant invasions over a fragmented landscapes"
+author: "pete rodrigue"
+date: "1/29/2020"
+output: html_document
+---
+
+<style type="text/css">
+.main-container {
+  max-width: 1800px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(scatterpie)
+```
+
+## Introduction
+
+This code simulates (in a very simplified way) the spread of seeds and plants between fragmented "islands" of habitat. The goal is to see how varying distance between islands changes plant genetics in later generations, similar to Williams, Kendall, and Levine (2016).
+
+Those authors look at the spread of Arabidopsis thaliana, or Mouse-Ear Cress, which is native to Eurasia (and part of the Brassicaceae family, like cabbage or mustard).
+
+!["Arabidopsis thaliana"](https://upload.wikimedia.org/wikipedia/commons/6/6f/Arabidopsis_thaliana.jpg)
+
+
+The code initializes a first generation, then allows seeds to spread to the right (and only to the right) a certain distance defined by the absolute value of random normal values. To survive, the seeds must land in a "pot" (a hospitable island). There are 3 pots. The first generation starts "off-screen," to the left of the three pots.
+
+The user can change:
+
+* The initial plant population size
+* The distance between the pots (the input value is a function of the standard deviation of the seed-travel-distance distribution)
+* Whether or not each generation of plants faces a "drought" which kills plants with a "drought tolerance" gene value below .25. There are 4 genes: "drought_tolerance", "predator_defense", "stalk_height", and "seed_fluffyness"--their values are randomly determined but sum to one (this implies some tradeoff between the genes).
+
+
+Questions to consider:
+
+* How might including pollination, not just seed dispersal, change what happens?
+* What do you notice about how the "genetic diversity" in the last pot changes in the last few generations?
+* What important dynamics are left out of this simulation?
+* If a gene vanishes from a line of plants, this simulation doesn't let that gene reappear later. How might that (potentially unrealistic) assumption impact what happen?
+* Do you find these simulations believable? Why or why not?
+* Can you think of any policy implications?
+
+Send me an email if you've got questions: peterodrigue at uchicago.edu
+
+
+This code proceeds in two sections: 
+
+1. The functions used to run the simulations
+2. The script that calls those functions to run the simulations and create summary graphs
+
+
+
+## Functions
+
+```{r}
+assign_generation <- function(gene_data, value) {
+  # This function sets up the data frame that represents the first (initial) generation of our plants
+  gene_data$generation <- value
+  names(gene_data) <- c("drought_tolerance", "predator_defense", "stalk_height", "seed_fluffyness", "generation")
+  return(gene_data)
+}
+
+normalize_genes <- function(gene_data) {
+  # this function normalizes each plant's gene values so they sum to one
+  for (ii in 1:nrow(gene_data)) {
+    gene_data[ii, 1:4] <- gene_data[ii, 1:4] / sum(gene_data[ii, 1:4])
+  }
+  return(round(gene_data, 3))
+}
+
+create_new_plant <- function(df_subset, old_generation_id, landing_position, ii) {
+  # this function adds a new plant. The inputs are 
+  # df_subset: the dataframe with the plants from the last generation
+  # old_generation_id: the id number of the last generation
+  # landing_position: the place where this seed landed
+  # ii: the row we're on
+  new_plant <- c(ifelse(test = df_subset$drought_tolerance[ii] > 0,     # these lines add some random variation to gene values
+                              yes = runif(1, -.1, .1)+df_subset$drought_tolerance[ii], 
+                              no = 0),
+                       ifelse(test = df_subset$predator_defense[ii] > 0, 
+                              yes = runif(1, -.1, .1)+df_subset$predator_defense[ii], 
+                              no = 0),
+                       ifelse(test = df_subset$stalk_height[ii] > 0, 
+                              yes = runif(1, -.1, .1)+df_subset$stalk_height[ii], 
+                              no = 0),
+                       ifelse(test = df_subset$seed_fluffyness[ii] > 0, 
+                              yes = runif(1, -.1, .1)+df_subset$seed_fluffyness[ii], 
+                              no = 0)
+                      )
+  new_plant[new_plant < 0] <- 0                   # <- set any gene values less than zero to be equal to zero
+  new_plant <- new_plant / sum(new_plant)         # <- normalize the genes to sum to one 
+  new_plant <- c(new_plant, old_generation_id + 1, landing_position)   # combine all this information into one vector
+  
+  return(new_plant)
+}
+
+
+create_new_generation <- function(df, old_generation_id, flower_pot_distances, num_seeds, drought_y_n) {
+  # This function takes our existing dataframe with our generations to date, and adds a new generation of plants.
+  # At least the ones that survive.
+  # df: dataframe with current generations of plants to date
+  # old_generation_id: the id number of the last generation
+  # flower_pot_distances: the vector that represents where the flower pots are
+  # num_seeds: the number of seeds each plant will have
+  # drought_y_n: boolean (TRUE/FALSE variable) for whether there's a drought in this generation or not
+  
+  to_add <- data.frame(matrix(rep(NA, 6), ncol=6))  # dataframe we'll append to the current dataframe, df, with our new plants/data.
+  names(to_add) <- names(df)
+  
+  df_subset <- df[df$generation == old_generation_id,]  # take the last generation of plants. Only the last generation can make seeds.
+  
+  if ( is.na(df_subset$position[1]) ) { ## exit the function after adding a placeholder plant with all NA genes 
+    to_add$drought_tolerance <- NA      ## if there were zero plants to produce seeds in the last generation
+    to_add$position <- NA
+    to_add$predator_defense <- NA
+    to_add$stalk_height <- NA
+    to_add$seed_fluffyness <- NA
+    to_add$generation <- old_generation_id + 1
+    to_add$position <- NA
+    return(rbind(df, to_add))
+    }  
+       
+  # If there was at least one surviving/extant plant in the last generation...
+  
+  for (ii in 1:nrow(df_subset)) {   # for each plant in the last/parent generation...
+    number_of_seeds <- num_seeds   # let that plant have some seeds...
+    
+    for(jj in 1:number_of_seeds) {     # where each of those seeds final resting place depends on the stalk height and seed fluffyness...
+      landing_position <- abs(rnorm(n=1, 
+                                    mean = df_subset$position[ii],      
+                                    sd = 3*df_subset$stalk_height[ii] + .3*df_subset$seed_fluffyness[ii]))  # <- just an arbitrary function of stalk height and seed fluffyness
+      
+      # for each seed to survive, it must land in a flower pot...
+      if (( (landing_position > flower_pot_distances[1]) & (landing_position < flower_pot_distances[2]) ) |    # does seed land in pot 1?
+          ( (landing_position > flower_pot_distances[3]) & (landing_position < flower_pot_distances[4]) ) |    # or pot 2?
+          ( (landing_position > flower_pot_distances[5]) & (landing_position < flower_pot_distances[6]) ) ) {  # or pot 3?
+        # if the seed lands in a pot, we'll assume it survives (if drought_y_n is FALSE) and has some genetic variation
+        # but genes can dissapear from a line of plants:
+        if (drought_y_n == TRUE) {               # if drought_y_n is TRUE, then there's a drought, and seed must have genes to survive
+          if (df_subset$drought_tolerance[ii] > .25) {
+            new_plant <- create_new_plant(df_subset=df_subset,              # <- create new plant
+                                          old_generation_id=old_generation_id, 
+                                          landing_position = landing_position,
+                                          ii)
+            
+            to_add <- rbind(to_add, new_plant)            # <- add this new plant to our dataframe with plants to add from this generation
+          } else {  # do nothing if the plant dies in the drought
+                next
+          }
+        } else {   # if there is no drought, just add the new plant
+               new_plant <- create_new_plant(df_subset=df_subset, 
+                                          old_generation_id=old_generation_id, 
+                                          landing_position = landing_position,
+                                          ii)
+               to_add <- rbind(to_add, new_plant)
+        }
+        
+      } else {next} # if the seed doesn't land in a pot, do nothing
+    }
+  }
+  to_add <- to_add[is.na(to_add$generation)==F,]
+  
+  return(rbind(df, to_add))  # <- return dataframe with new generation added
+  
+}
+
+
+
+run_5_generations <- function(pot_dist_quantile=.85, drought_list, num_seeds=5, num_initial_plants=20) {
+  # this function simulates 5 generations of plants and returns the results
+  # pot_dist_quantile: decimal # that decides how far apart the plants are
+  # drought_list: vector of 4 TRUE/FALSE values. TRUE means there's a drought in that generation.
+  # num_seeds: number of seeds produced by each surviving plant in each generation
+  # num_initial_plants: the starting number of plants
+  
+  # initialize the first generation:
+  df <- 
+    normalize_genes(
+      assign_generation(
+        data.frame(matrix(runif(num_initial_plants*4), nrow = num_initial_plants)),   # 20 starting plants
+        1))
+  
+  # initialize flower pot size and location (there are 3 pots each 1 unit wide)
+  # notice that as you increase the distance by increasing the percentile used, the later pots become more homogeneous
+  pot_gap <- 3*quantile(df$stalk_height, probs = pot_dist_quantile) + 
+    .3*quantile(df$seed_fluffyness, probs = pot_dist_quantile)
+  flower_pot_distances <- c(pot_gap, pot_gap + 1, # first pot
+                            2*pot_gap + 1, 2*pot_gap + 2,  # second pot 
+                            3*pot_gap + 2, 3*pot_gap + 3)  # third pot
+  
+  
+  # note that all the plants start at exactly at position 0.
+  df$position <- 0
+  seeds <- num_seeds  # Number of seeds per plant
+  
+  # make gen 2
+  df <- create_new_generation(df, old_generation_id=1, flower_pot_distances, num_seeds = seeds, drought_y_n=drought_list[1])
+  # make gen 3
+  df <- create_new_generation(df, old_generation_id=2, flower_pot_distances, num_seeds = seeds, drought_y_n=drought_list[2])
+  # make gen 4
+  df <- create_new_generation(df, old_generation_id=3, flower_pot_distances, num_seeds = seeds, drought_y_n=drought_list[3])
+  # gen 5
+  df <- create_new_generation(df, old_generation_id=4, flower_pot_distances, num_seeds = seeds, drought_y_n=drought_list[4])
+  
+  # figure out what pot all the plants are in:
+  df$flower_pot <- 2
+  df$flower_pot[df$position < flower_pot_distances[2]] <- 1
+  df$flower_pot[df$position > flower_pot_distances[5]] <- 3
+  df$flower_pot[df$position == 0] <- 0
+  table(df$flower_pot)
+  
+  
+  df$dominant_gene <- NA
+  for (ii in 1:nrow(df)) {   ## this loop just loops through each plant/row and finds the dominant gene in that plant/row
+    largest_val <- -1
+    for (jj in 1:4) {
+      if( is.na(df[ii, jj]) == F ) {    ## if the row isn't one of those placeholder rows, continue
+        if ( df[ii, jj] > largest_val) {
+          largest_val <- df[ii, jj]
+          df$dominant_gene[ii] <- names(df)[jj]
+        }
+      }
+    }
+  }
+  
+  return(list(df, pot_gap))
+}
+
+
+simulate_many_worlds <-function(iter_pot_dist_quantile, iter_drought_list, iter_num_seeds, iter_num_initial_plants, num_iterations) {
+  # Simulate 5 generations hundreds of times, to create a distribution of results
+  # iter_pot_dist_quantile: same as before, decides how far apart the pots are
+  # iter_drought_list: same as before, decides what generations have droughts
+  # iter_num_seeds: same as before, decides how many seeds each plant produces
+  # iter_num_initial_plants: same as before, the initial number of plants
+  # num_iterations: the number of iterations to do.
+  
+  for (ii in 1:num_iterations) {
+    if (ii %% 100 == 0) {print(ii)}
+    results <- run_5_generations(pot_dist_quantile=iter_pot_dist_quantile, # run one simulation of 5 generations. Get the results.
+                      drought_list=iter_drought_list, 
+                      num_seeds=iter_num_seeds, 
+                      num_initial_plants=iter_num_initial_plants) 
+    
+    # summarize what happened in generation 5 of that simulation:
+    temp_df <- results[[1]] %>% dplyr::filter(generation==5) %>% dplyr::group_by(flower_pot) %>% dplyr::summarise_all(mean)
+    if (nrow(temp_df)==0) {next}   # if no plants survived to generation 5, just keep going
+    # store results of this iteration:
+    temp_df <- data.frame(temp_df)
+    temp_df$iteration <- ii
+    temp_df$num_plants_in_gen_5 <- nrow(results[[1]][results[[1]]$generation == 5, ])
+    temp_df$num_plants_in_gen_5_in_pot_3 <- nrow(results[[1]][results[[1]]$generation == 5 & results[[1]]$flower_pot == 3, ])
+    
+    # append results onto big dataframe, unless we're on the first iteration. In that case, setup the big dataframe.
+    if (ii == 1) {
+      rv <- temp_df
+    } else {
+      rv <- rbind(rv, temp_df)
+    }
+  }
+  
+  return(rv)
+}
+
+
+
+make_plots <- function(df, pot_gap) {
+  # this just prints some fancy plots
+  p <- 
+    ggplot(df, aes(x=factor(flower_pot), fill=dominant_gene)) + geom_bar() +
+  facet_grid(~generation) + 
+  xlab("Flower pot (1-3); Generation (0-5)") + ylab("sum of gene values") + 
+  ggtitle("Total gene counts by generation and pot") + labs(fill = "gene")
+  
+  print(p)
+  
+  data_to_plot <- df 
+  data_to_plot$position[data_to_plot$flower_pot==0] <- 
+    data_to_plot$position[data_to_plot$flower_pot==0] + 
+    runif(length(data_to_plot$position[data_to_plot$flower_pot==0]), min = -.1, max = .1)
+  data_to_plot$position_y <- runif(n=nrow(data_to_plot), min = 0, max = 4)
+  p <- 
+    ggplot(data_to_plot, aes(x=position, y=position_y, col=factor(dominant_gene))) +
+    geom_point(alpha=.6, size=2) + theme_minimal() + 
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+  panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+    facet_wrap(~generation) +
+    geom_vline(xintercept=-.15) + geom_vline(xintercept=.15) +
+    geom_vline(xintercept=pot_gap) + geom_vline(xintercept=pot_gap+1) +
+    geom_vline(xintercept=2*pot_gap + 1) + geom_vline(xintercept=2*pot_gap+2) +
+    geom_vline(xintercept=3*pot_gap+2) + geom_vline(xintercept=3*pot_gap+3) +
+    xlab("x position of each plant") + ylab("y position of each plant") + 
+    ggtitle("Dominant gene, generations 1-5 (pots shown as rectangles)") + labs(col = "gene")
+  
+  print(p)
+  
+  data_to_plot <- 
+    data_to_plot %>% 
+    select(-dominant_gene, -flower_pot)
+  p <-
+    ggplot() + geom_scatterpie(aes(x=position, y=position_y), data=data_to_plot,
+                             cols=c("drought_tolerance", "predator_defense", "stalk_height", "seed_fluffyness"),
+                             alpha=.5) + 
+                               coord_equal() + theme_minimal() +
+      theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+  panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+    facet_wrap(~generation) +
+    geom_vline(xintercept=-.15) + geom_vline(xintercept=.15) +
+    geom_vline(xintercept=pot_gap) + geom_vline(xintercept=pot_gap+1) +
+    geom_vline(xintercept=2*pot_gap + 1) + geom_vline(xintercept=2*pot_gap+2) +
+    geom_vline(xintercept=3*pot_gap+2) + geom_vline(xintercept=3*pot_gap+3) +
+    xlab("x position of each plant") + ylab("y position of each plant") + 
+    ggtitle("Seeds' gene composition by generation and pot")
+  
+  print(p)
+  
+  data_to_plot <-
+    df %>%
+    select(-position, -dominant_gene) %>%
+    dplyr::group_by(generation, flower_pot) %>%
+    dplyr::summarise_all(mean) 
+  data_to_plot <- tidyr::gather(data_to_plot, "gene", "mean", drought_tolerance:seed_fluffyness)
+  p <- 
+    ggplot(data_to_plot, aes(x=factor(flower_pot), y=mean, fill=gene)) + geom_bar(stat = "identity", position='dodge') +
+    facet_grid(~generation) + # theme_minimal() +
+    xlab("Flower pot (1-3); Generation (0-5)") + ylab("mean of gene values") + 
+    ggtitle("Mean gene values by generation and pot") + labs(fill = "gene")
+  
+  print(p)
+}
+```
+
+
+
+## Script
+
+
+#### Just one simulation, no drought:
+
+```{r}
+set.seed(983488)
+
+results <- run_5_generations(pot_dist_quantile = .85, drought_list = rep(F, 4), num_seeds = 5, num_initial_plants = 20)
+df <- results[[1]]
+pot_gap <- results[[2]]
+```
+
+
+The plant's seed dispersal patterns look something like this:
+
+```{r, fig.width=18, fig.height=10}
+hist(
+  abs(rnorm(n=10000, 
+          mean = df$position[1],
+          sd = 3*df$stalk_height[1] + .3*df$seed_fluffyness[1])),
+  main="distribution of seed-travel distances", xlab="distance")
+```
+
+Note that the seeds only spread to the right, and they're more likely to land near the plant than farther away.
+
+This first simulation places the pots relatively far away from each other. You'll see that in the last pot (pot 3) in the final two generations is mostly full of plants with tall stalks (i.e. "stalk_height" is the dominant gene). There is, however, slightly more genetic diversity (and a larger population size) in the final generation in pot 3, relative to the penultimate generation in pot 3. The dispersal front of plants with different dominant genes ("predator_defense" in this case) start to catch up to the speedy, stalk-height disperal front. 
+
+The first plot below shows the sum of the genes in each pot (1, 2, or 3) in each generation (0, 1, 2, 3, 4, or 5).
+
+The second plot shows the plants as dots, colored by their dominant gene. The pots are represented by the vertical black lines.
+
+The third plot again shows each individual plant in each generation, but now shows the actual genetic makeup, represented using pie charts.
+
+The last chart shows the mean gene value in each generation and pot, effectively showing us what the "average" plant looks like.
+
+Here are the plots:
+
+```{r, fig.width=18, fig.height=10}
+make_plots(df, pot_gap)
+```
+
+
+#### Just one simulation, with a drought:
+
+Now we will run a simulation where the pots are still far apart (more fragmented landscape), but a drought occurs in the final generation, killing all plants with a value of the "drought tolerance" gene less than .25. 
+
+
+```{r}
+set.seed(983488)
+
+results <- run_5_generations(pot_dist_quantile = .85, drought_list = c(F, F, F, T), num_seeds = 5, num_initial_plants = 20)
+df <- results[[1]]
+pot_gap <- results[[2]]
+```
+
+Note that things look similar to the last simulation, except for the last generation, where all of the plants in pot 3 die, because they're focused on stalk height, and do not have sufficient drought tolerance to survive the drought.
+
+```{r, fig.width=18, fig.height=10}
+make_plots(df, pot_gap)
+```
+
+
+#### Moving the plots closer together:
+
+In this simulation we move the pots closer together. Note that this simulation results in greater genetic diversity in the pot 3 in generation 5, and a greater number of plants in general.
+
+```{r}
+set.seed(983488)
+
+results <- run_5_generations(pot_dist_quantile = .4, drought_list = c(F, F, F, F), num_seeds = 5, num_initial_plants = 20)
+df <- results[[1]]
+pot_gap <- results[[2]]
+```
+
+Plots:
+
+```{r, fig.width=18, fig.height=10}
+make_plots(df, pot_gap)
+```
+
+#### Distribution of simulation results
+
+Now we will iterate over these simulations many times, to get a distribution of results.
+
+```{r, warning=F}
+
+num_iters <- 500
+
+results1 <- simulate_many_worlds(iter_pot_dist_quantile=.85, 
+                                iter_drought_list=c(F, F, F, F), 
+                                iter_num_seeds=5, 
+                                iter_num_initial_plants=20,
+                                num_iterations=num_iters)
+results1$sim <- "no drought, pots far apart"
+
+results2 <- simulate_many_worlds(iter_pot_dist_quantile=.45, 
+                                iter_drought_list=c(F, F, F, F), 
+                                iter_num_seeds=5, 
+                                iter_num_initial_plants=20,
+                                num_iterations=num_iters)
+results2$sim <- "no drought, pots close together"
+
+results3 <- simulate_many_worlds(iter_pot_dist_quantile=.45, 
+                                iter_drought_list=c(F, F, F, T), 
+                                iter_num_seeds=5, 
+                                iter_num_initial_plants=20,
+                                num_iterations=num_iters)
+results3$sim <- "drought, pots close together"
+
+results4 <- simulate_many_worlds(iter_pot_dist_quantile=.85, 
+                                iter_drought_list=c(F, F, F, T), 
+                                iter_num_seeds=5, 
+                                iter_num_initial_plants=20,
+                                num_iterations=num_iters)
+results4$sim <- "drought, pots far apart"
+
+results <- dplyr::rbind_all(list(results1, results2, results3, results4))
+
+```
+
+Note that the drought limits the number of plants, as we might expect, but so does the landscape fragmentation. The second figure shows that the fragmentation and drought also change the genetic makeup of the plant population.
+
+```{r, fig.width=18, fig.height=10}
+
+results <- 
+  results %>% 
+  dplyr::group_by(sim) %>% 
+  mutate(mean_num_plants_in_gen_5=mean(num_plants_in_gen_5),
+         mean_num_plants_in_gen_5_in_pot_3=mean(num_plants_in_gen_5_in_pot_3))
+ggplot(results) + 
+  geom_histogram(aes(x=num_plants_in_gen_5), alpha=.5, fill='skyblue', binwidth = 5) + 
+  geom_histogram(aes(x=num_plants_in_gen_5_in_pot_3), alpha=.5, fill='hotpink', binwidth = 5) +
+  geom_vline(aes(xintercept=mean_num_plants_in_gen_5, group=sim), color='blue') + 
+  geom_vline(aes(xintercept = mean_num_plants_in_gen_5_in_pot_3, group=sim), color='red') +
+  facet_wrap(~sim, ncol=1) +
+  xlab("# plants in gen 5 (blue), # plants in gen 5 in pot 3 (red)")
+results %>% dplyr::group_by(flower_pot) %>% dplyr::tally()
+results_long <- results %>% 
+  dplyr::select(-c(generation, iteration, dominant_gene, position, 
+                   num_plants_in_gen_5, num_plants_in_gen_5_in_pot_3,
+                   mean_num_plants_in_gen_5, mean_num_plants_in_gen_5_in_pot_3))
+results_long <- results_long %>% tidyr::gather("gene", "value", -c(flower_pot, sim))
+ggplot(results_long, aes(x=value, fill=gene)) + geom_histogram(alpha=.6) + 
+  facet_wrap(sim ~ flower_pot, ncol=3) +
+  xlab('flower pot') + ylab('simulation')
+```
+
+
+
+
